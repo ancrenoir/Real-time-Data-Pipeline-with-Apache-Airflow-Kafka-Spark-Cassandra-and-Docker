@@ -1,0 +1,82 @@
+from datetime import datetime
+import requests
+import json
+from kafka import KafkaProducer
+import logging
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+
+## Paramètres à appliquer à l'ensemble des DAG
+
+default_arguments = {
+    'owner': 'Georges',
+    'start_date': datetime(2024, 9, 30, 23, 12)  # datetime(année, mois, jours, heures, minutes)
+}
+
+## Collection de données
+
+def get_data():
+    response = requests.get("https://randomuser.me/api/")
+    response = response.json()
+    response = response['results'][0]
+    return response
+
+## Standardisation du format de données qui retourne un dictionnaire dict_data contenant les données standardisées
+
+def formatage_data(response):
+    location = response['location']
+    login = response['login']
+    dict_data = {}
+    dict_data['Nom'] = response['name']['first']
+    dict_data['Prenom'] = response['name']['last']
+    dict_data['genre'] = response['gender']
+    dict_data['Adresse'] = f"{str(location['street']['number'])} {location['street']['name']}, {location['city']}, {location['state']}, {location['country']}"
+    dict_data['codePostale'] = location['postcode']
+    dict_data['email'] = response['email']
+    dict_data['username'] = login['username']
+    dict_data['id_login'] = login['uuid']
+    dict_data['password'] = login['password']
+    dict_data['numero'] = response['phone']
+    dict_data['dob'] = response['dob']['date']
+    dict_data['registred_data'] = response['registered']['date']
+    dict_data['image_user'] = response['picture']['large']
+    return dict_data
+
+def stream_data():
+    response = get_data()
+    formatted_data = formatage_data(response)
+
+    ## Création d'un producteur qui va se connecter à l'host 9092 de Kafka
+    producer = KafkaProducer(
+        bootstrap_servers=['localhost:9092'],
+        max_block_ms=30000,
+        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+    )
+
+    ## Post de la donnée via ce producteur
+    try:
+        future = producer.send('topic_54', formatted_data)
+        record_metadata = future.get(timeout=10)
+        logging.info(f"Message sent to topic: {record_metadata.topic}, partition: {record_metadata.partition}, offset: {record_metadata.offset}")
+    except Exception as e:
+        logging.error(f"Error sending message: {e}")
+    finally:
+        producer.flush()
+        producer.close()
+
+# Définition du DAG
+with DAG(
+    'user_data_extrat',
+    default_args=default_arguments,
+    schedule='@daily',
+    catchup=False
+) as dag:
+    streaming_task = PythonOperator(
+        task_id='Données_utilisateurs',
+        python_callable=stream_data
+    )
+
+stream_data()
